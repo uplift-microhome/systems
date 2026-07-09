@@ -553,7 +553,7 @@ const FIELDS = {
     ['childFactor','Child water use','%',5,'How much water a child uses relative to an adult. 60% means a child draws 0.6x an adult. Feeds the water-equivalent occupancy.'],
   ],
   'grp-system':[
-    ['busVoltage','DC bus voltage','V',1,'DC voltage of the house electrical bus (48 V here). Sets amp draw for the heater and pump: Amps = Watts / Volts.'],
+    ['busVoltage','DC bus voltage','V',1,'DC voltage of the house electrical bus. Sets amp draw for the heater and pump: Amps = Watts ÷ Volts.'],
     ['daysAutonomy','Days of autonomy','days',0.5,'How many days the system must run with no resupply — no tank refill and no solar. Sizes BOTH the water tanks and the battery bank; higher = more storage.'],
     ['reservePct','Tank reserve','%',5,'Safety buffer kept in the fresh tank on top of daily use so you never run it bone-dry. 15% is roughly a partial extra day of margin.'],
   ],
@@ -660,11 +660,12 @@ function renderInputs(){
   for(const grp in FIELDS){
     let html='';
     for(const [key,label,unit,step,help,dim] of FIELDS[grp]){
-      const tip = help?` <i class="ti ti-help-circle help" title="${help}"></i>`:'';
       const c = dim?DIM[dim]:null;
       const shownVal = c?parseFloat(c.d(S[key]).toFixed(2)):S[key];
       const shownUnit = c?c.u():unit;
       const handler = c?`updDim('${key}','${dim}',this.value)`:`upd('${key}',this.value)`;
+      const tipText = help?`${help} — current: ${shownVal} ${shownUnit}`.trim():'';   // live value appended
+      const tip = tipText?` <i class="ti ti-help-circle help" title="${tipText}"></i>`:'';
       html+=`<div class="field"><div class="field-lbl">${label}${tip}</div>
         <div class="field-input"><input type="number" step="${step}" value="${shownVal}" oninput="${handler}">
         <span class="unit">${shownUnit}</span></div></div>`;
@@ -996,8 +997,15 @@ function recalc(){
 
   // ---------- META ----------
   const occStr=`${R.occHead} people`+(S.children?` · ${f(R.occEq,1)} water-eq`:'');
+  const battTip=`Pytes V5° · LFP · ${f(S.battNomV,1)} V nominal (47.5–57.6 V) · ${f(S.battModAh,0)} Ah / ${f(S.battModKwh,2)} kWh per module · `+
+    `pack ${S.battModules}× → ${f(S.battModules*S.battModAh,0)} Ah / ${f(R.installedWh/1000,2)} kWh · `+
+    `${S.batteryDoDPct}% DoD → ${f(R.usableWh/1000,2)} kWh usable · ~${S.systemEffPct}% round-trip · 6000+ cycles · 10 yr warranty · UL 1973/9540A. Click to edit parameters.`;
+  const busMeta=`<div class="meta-item" onclick="openBattModal()" style="cursor:pointer;" title="${battTip}">`+
+    `<div class="meta-label">Bus / battery <i class="ti ti-info-circle help"></i></div>`+
+    `<div class="meta-val">${S.busVoltage} V DC</div>`+
+    `<div style="font-size:11px;color:var(--color-text-tertiary);margin-top:2px;">${S.battModules}× Pytes V5° · ${f(R.installedWh/1000,2)} kWh · ${f(R.daysAchieved,1)} d</div></div>`;
   setHTML('meta-bar',
-    meta('Bus voltage',`${S.busVoltage} V DC`) +
+    busMeta +
     meta('Occupancy',occStr) +
     meta('Toilet',S.toiletMode==='urine-sep'?'Composting · urine sep':'Composting · leachate')
   );
