@@ -316,6 +316,7 @@ svg{display:block;max-width:100%;height:auto;}
 
     <!-- HW TAB 0: Tank sizing -->
     <div class="hwpane" data-hw="0">
+      <div class="info-bar" id="hotfrac-note"></div>
       <div class="card">
         <div class="section-title"><i class="ti ti-calculator"></i>Calculation waterfall</div>
         <div id="wf" style="display:flex;flex-direction:column;gap:5px;"></div>
@@ -497,8 +498,8 @@ svg{display:block;max-width:100%;height:auto;}
 const S = {
   // occupancy — head count split by type; S.occupancy is derived each recalc
   adults:2, children:0, guests:0, childFactor:60, occupancy:2,
-  // system
-  busVoltage:48, daysAutonomy:3, reservePct:15,
+  // system — autonomy split: water-days (cheap tank volume) vs power-days (expensive battery)
+  busVoltage:48, waterDays:5, powerDays:3, reservePct:15,
   // hot water
   inletF:55, setpointF:130, tankGal:10, elementW:1500,
   insulRperIn:6.5, insulIn:3, ambientF:68,
@@ -515,10 +516,10 @@ const S = {
 // fixtures: gpm=flowrate, min=effective water-on min/day, pctHot=% from hot tank,
 // grey=drains to grey tank, pp=usage scales per person, dfu=drainage fixture units, trap=trap size in.
 let fixtures = [
-  {name:'Kitchen sink',  gpm:1.5,  min:5, pctHot:60, grey:true,  pp:true,  dfu:2, trap:1.5,  showerLike:false},
+  {name:'Kitchen sink',  gpm:1.2,  min:5, pctHot:60, grey:true,  pp:true,  dfu:2, trap:1.5,  showerLike:false},
   {name:'Bathroom sink', gpm:1.2,  min:4, pctHot:50, grey:true,  pp:true,  dfu:1, trap:1.25, showerLike:false},
   {name:'Shower',        gpm:1.75, min:2, pctHot:77, grey:true,  pp:true,  dfu:2, trap:2.0,  showerLike:true},
-  {name:'Hose bib',      gpm:3.0,  min:2, pctHot:0,  grey:false, pp:false, dfu:0, trap:0,    showerLike:false},
+  {name:'Hose bib',      gpm:3.0,  min:2, pctHot:0,  grey:false, pp:false, dfu:0, trap:0,    showerLike:false}, // flow-restricted to 3 GPM
 ];
 
 // candidate shower heads to compare (what-if, does not affect model until "Use")
@@ -564,7 +565,8 @@ const FIELDS = {
   ],
   'grp-system':[
     ['busVoltage','DC bus voltage','V',1,'DC voltage of the house electrical bus. Sets amp draw for the heater and pump: Amps = Watts ÷ Volts.'],
-    ['daysAutonomy','Days of autonomy','days',0.5,'How many days the system must run with no resupply — no tank refill and no solar. Sizes BOTH the water tanks and the battery bank; higher = more storage.'],
+    ['waterDays','Water autonomy','days',0.5,'Days the fresh/grey tanks must last with no resupply — sized for storm / limited-access gaps. Cheap to extend (bigger tank).'],
+    ['powerDays','Power autonomy','days',0.5,'Days the battery must ride through with no solar. Each day adds expensive battery — buy fewer here and lean on the panels returning.'],
     ['reservePct','Tank reserve','%',5,'Safety buffer kept in the fresh tank on top of daily use so you never run it bone-dry — extra margin beyond the days of autonomy.'],
   ],
   'grp-hot':[
@@ -714,7 +716,9 @@ function renderFixtureTable(){
       <td class="name"><input type="text" value="${fx.name}" oninput="updFix(${i},'name',this.value)"></td>
       <td><input type="number" step="0.05" value="${f(uFl(fx.gpm),2)}" oninput="updFixFlow(${i},this.value)"></td>
       <td><input type="number" step="0.5" value="${fx.min}" oninput="updFix(${i},'min',this.value)"></td>
-      <td><input type="number" step="5" value="${fx.pctHot}" oninput="updFix(${i},'pctHot',this.value)"></td>
+      <td>${fx.showerLike
+        ? `<span class="help" title="Auto-derived from temperatures: (mix ${T(S.showerMixF)} − inlet ${T(S.inletF)}) ÷ (setpoint ${T(S.setpointF)} − inlet ${T(S.inletF)}) = ${Math.round((S.showerMixF-S.inletF)/(S.setpointF-S.inletF)*100)}%. Not editable — it follows the tank/mix temps.">${Math.round((S.showerMixF-S.inletF)/(S.setpointF-S.inletF)*100)}%<i class="ti ti-calculator" style="font-size:11px;margin-left:3px;"></i></span>`
+        : `<input type="number" step="5" value="${fx.pctHot}" oninput="updFix(${i},'pctHot',this.value)">`}</td>
       <td style="text-align:center"><input type="checkbox" ${fx.grey?'checked':''} onchange="updFix(${i},'grey',this.checked)"></td>
       <td style="text-align:center"><input type="checkbox" ${fx.pp?'checked':''} onchange="updFix(${i},'pp',this.checked)"></td>
       <td style="text-align:center"><button class="btn tiny" onclick="rmFixture(${i})">✕</button></td>
@@ -803,17 +807,19 @@ function recalc(){
   S.occupancy = (S.adults||0)+(S.children||0)+(S.guests||0);          // head count
   const occEq = (S.adults||0)+(S.guests||0)+(S.children||0)*(S.childFactor/100); // water-equivalent
   occEqG = occEq;
-  Object.assign(R,{occHead:S.occupancy, occEq});
+  // shower hot fraction — single source of truth, derived from temps (mix blended down from setpoint)
+  const hotFrac=(S.showerMixF-S.inletF)/(S.setpointF-S.inletF);
+  Object.assign(R,{occHead:S.occupancy, occEq, hotFrac});
 
   // ---------- DEMAND ----------
   let totalFresh=0,hotDaily=0,greyDaily=0;
-  fixtures.forEach(fx=>{const g=fixGal(fx);totalFresh+=g;hotDaily+=g*fx.pctHot/100;if(fx.grey)greyDaily+=g;});
+  fixtures.forEach(fx=>{const g=fixGal(fx);totalFresh+=g;const hp=fx.showerLike?hotFrac:(fx.pctHot/100);hotDaily+=g*hp;if(fx.grey)greyDaily+=g;});
   const indoor=fixtures.filter(fx=>fx.grey).map(fx=>fx.gpm).sort((a,b)=>b-a);
   const peakIndoor=(indoor[0]||0)+(indoor[1]||0);
   const hose=Math.max(0,...fixtures.filter(fx=>!fx.grey).map(fx=>fx.gpm));
   const peakFlow=Math.max(peakIndoor,hose);
-  const freshTank=totalFresh*S.daysAutonomy*(1+S.reservePct/100);
-  const greyTank=greyDaily*S.daysAutonomy;
+  const freshTank=totalFresh*S.waterDays*(1+S.reservePct/100);
+  const greyTank=greyDaily*S.waterDays;
   Object.assign(R,{totalFresh,hotDaily,greyDaily,peakFlow,freshTank,greyTank});
 
   setHTML('out-demand',
@@ -821,14 +827,14 @@ function recalc(){
     mcard('Hot water',uVu()+'/day',f(uV(hotDaily),1)) +
     mcard('Grey produced',uVu()+'/day',f(uV(greyDaily),1)) +
     mcard('Peak flow',uFlu(),f(uFl(peakFlow),2),peakIndoor>=hose?'2 fixtures on':'hose bib') +
-    mcard('Fresh tank',uVu(),f(uV(freshTank),0),`${S.daysAutonomy}d + ${S.reservePct}% reserve`) +
-    mcard('Grey tank',uVu(),f(uV(greyTank),0),`${S.daysAutonomy}d capture`)
+    mcard('Fresh tank',uVu(),f(uV(freshTank),0),`${S.waterDays}d + ${S.reservePct}% reserve`) +
+    mcard('Grey tank',uVu(),f(uV(greyTank),0),`${S.waterDays}d capture`)
   );
   setHTML('note-demand',
     `<div class="notice-title"><i class="ti ti-info-circle"></i>How this is figured</div>`+
     `Each fixture = flow × min/day × (occupancy if per-person). Summed: <b>${VOL(totalFresh,1)}/day fresh</b>, of which <b>${VOL(hotDaily,1)}</b> is hot. `+
     `Grey (drained fixtures only) = <b>${VOL(greyDaily,1)}/day</b>; hose bib &amp; composting toilet add no grey. `+
-    `Fresh tank = ${VOL(totalFresh,1)} × ${S.daysAutonomy} days × (1+${S.reservePct}%) = <b>${VOL(freshTank,0)}</b>.`
+    `Fresh tank = ${VOL(totalFresh,1)} × ${S.waterDays} water-days × (1+${S.reservePct}%) = <b>${VOL(freshTank,0)}</b>.`
   );
 
   // ---------- HOT WATER (shared model — feeds energy budget + sub-tabs) ----------
@@ -843,8 +849,7 @@ function recalc(){
   const elementAmps=S.elementW/S.busVoltage;
   // military-shower session capacity (drives Tank-sizing sub-tab)
   const shf=showerFix();
-  const hotFrac=(S.showerMixF-S.inletF)/(S.setpointF-S.inletF);     // hot share to hit mixed temp
-  const mixGal=shf.gpm*shf.min*occEq*S.foI;                        // mixed shower water / session (water-equiv occupancy)
+  const mixGal=shf.gpm*shf.min*occEq*S.foI;                        // mixed shower water / session (water-equiv occupancy); hotFrac computed above
   const hotNeed=mixGal*hotFrac;                                    // hot gal drawn / session
   const hotPerPerson=shf.gpm*shf.min*S.foI*hotFrac;                // hot gal per single shower
   const consecShowers=hotPerPerson>0?S.tankGal/hotPerPerson:Infinity;
@@ -972,14 +977,14 @@ function recalc(){
   const installedAh=S.battModules*S.battModAh;                 // parallel Ah
   const usableWh=installedWh*(S.batteryDoDPct/100)*(S.systemEffPct/100);  // delivered usable
   const daysAchieved=totalLoadWh>0?usableWh/totalLoadWh:Infinity;
-  const reqBankWh=totalLoadWh*S.daysAutonomy/((S.batteryDoDPct/100)*(S.systemEffPct/100));
+  const reqBankWh=totalLoadWh*S.powerDays/((S.batteryDoDPct/100)*(S.systemEffPct/100));
   const reqModules=Math.max(1,Math.ceil(reqBankWh/modWh));
-  const meetsDays=daysAchieved>=S.daysAutonomy;
+  const meetsDays=daysAchieved>=S.powerDays;
   Object.assign(R,{totalLoadWh,installedWh,installedAh,usableWh,daysAchieved,reqModules,meetsDays,modules:S.battModules});
   setHTML('out-battery',
     mcard('Total daily load','Wh/day',f(totalLoadWh,0),`water ${f(waterWhDay,0)} + other ${f(S.otherLoadsWh,0)}`) +
     mcard('Installed pack','kWh',f(installedWh/1000,2),`${S.battModules}× V5° · ${f(installedAh,0)} Ah`) +
-    mcard('Autonomy','days',f(daysAchieved,1),`target ${f(S.daysAutonomy,1)} d`) +
+    mcard('Autonomy','days',f(daysAchieved,1),`target ${f(S.powerDays,1)} d (power)`) +
     mcard('Modules for target','×',reqModules,meetsDays?`✓ ${S.battModules} installed`:`✗ need ${reqModules}, have ${S.battModules}`) +
     mcard('Peak current','A DC',f(peakAmps,1),'heater + pump')
   );
@@ -990,8 +995,8 @@ function recalc(){
       `Installed <b>${f(installedWh/1000,2)} kWh</b> (${f(installedAh,0)} Ah), of which <b>${f(usableWh/1000,2)} kWh</b> is deliverable at ${S.batteryDoDPct}% DoD × ${S.systemEffPct}% efficiency. `+
       `Against a <b>${f(totalLoadWh,0)} Wh/day</b> total load that's <b>${f(daysAchieved,1)} days</b> of autonomy. `+
       (meetsDays
-        ? `Meets your ${f(S.daysAutonomy,1)}-day target with ${f(usableWh/1000-totalLoadWh*S.daysAutonomy/1000,2)} kWh to spare.`
-        : `Short of the ${f(S.daysAutonomy,1)}-day target — you'd need <b>${reqModules} modules</b>. Add a module, cut load, or accept fewer days.`)+
+        ? `Meets your ${f(S.powerDays,1)}-day power target with ${f(usableWh/1000-totalLoadWh*S.powerDays/1000,2)} kWh to spare.`
+        : `Short of the ${f(S.powerDays,1)}-day power target — you'd need <b>${reqModules} modules</b>. Add a module, cut load, or accept fewer days.`)+
       ` Edit pack parameters via the battery spec button. V5° nominal 51.2 V, LFP.`;
   }
 
@@ -1118,6 +1123,7 @@ function setShape(v){S.tankShape=v;recalc();}
 function renderHwSizing(){
   const shf=showerFix(), hf=R.hotFrac, mix=R.mixGal, tn=R.hotNeed;
   const gpp=shf.gpm*shf.min, gAll=gpp*R.occEq, head=S.tankGal-tn;
+  setHTML('hotfrac-note',`<b>Shower hot fraction</b> = (mix − inlet) ÷ (setpoint − inlet) = (${T(S.showerMixF)} − ${T(S.inletF)}) ÷ (${T(S.setpointF)} − ${T(S.inletF)}) = <b>${Math.round(hf*100)}%</b>. The shower blends that share of ${T(S.setpointF)} tank water with cold to reach ${T(S.showerMixF)} at the head — it's derived, not hand-set, so it always tracks the temps. (Sinks keep their own manual %hot.)`);
   const occLbl=`${R.occHead} ppl${S.children?` (${f(R.occEq,1)} water-eq)`:''}`;
   const steps=[
     [`${shf.min} min × ${FLOW(shf.gpm,2)}`,`${VOL(gpp,1)}/person`,'effective water-on time'],
@@ -1311,6 +1317,7 @@ function load(){
     if(!raw) return false;
     const d = JSON.parse(raw);
     if(d && d.S) Object.assign(S, d.S);
+    if(d && d.S && d.S.daysAutonomy!=null && d.S.waterDays==null){ S.waterDays=d.S.daysAutonomy; S.powerDays=d.S.daysAutonomy; }  // migrate old single-autonomy saves
     if(d && Array.isArray(d.fixtures)) fixtures = d.fixtures;
     if(d && Array.isArray(d.showerHeads)) showerHeads = d.showerHeads;
     if(d && Array.isArray(d.pumpCurve)) pumpCurve = d.pumpCurve;
