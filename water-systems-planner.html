@@ -1451,7 +1451,7 @@ function renderPumpMath(){
 function renderDiagram(){
   const host=el('dep-svg'); if(!host) return;
   const LW=300, GAP=18, NX=14, NW=LW-2*NX, LT=26;
-  const W=5*LW+4*GAP, H=545, CH0=442;
+  const W=5*LW+4*GAP, H=610, CH0=444;
   const lanes=['1 · WATER DEMAND','2 · HOT WATER','3 · PUMP','4 · POWER + BATTERY','5 · TOILET'];
   const laneH=[430,430,430,430,220];
   const lx=i=>i*(LW+GAP);
@@ -1482,8 +1482,8 @@ function renderDiagram(){
     } else {
       // spanning >1 lane: drop into a channel BELOW the lanes so nothing crosses a box
       const i=busI++;
-      const chY=CH0+i*13;              // wider channel rows so horizontals don't collide
-      const dx=((i%3)-1)*5;            // fan the vertical corridors within the gaps
+      const chY=CH0+i*20;              // wide channel rows so horizontals don't collide
+      const dx=((i%3)-1)*7;            // fan the vertical corridors within the gaps
       const gS=lx(A.lane)+LW+GAP/2+dx; // gap just right of source lane
       const gT=lx(B.lane)-GAP/2+dx;    // gap just left of target lane
       body+=`<path d="M${x1} ${y1} L${gS} ${y1} L${gS} ${chY} L${gT} ${chY} L${gT} ${y2} L${x2-5} ${y2}" fill="none" stroke="#d79b00" stroke-width="1.5" opacity="0.85" marker-end="url(#dgArrO)"/>`;
