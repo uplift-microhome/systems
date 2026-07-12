@@ -532,6 +532,7 @@ svg{display:block;max-width:100%;height:auto;}
       <div id="pump-curve-editor"></div>
       <button class="btn" onclick="addCurvePoint()">+ add point</button>
       <div style="margin-top:14px;" id="pump-chart"></div>
+      <div id="pump-readout" class="footnote" style="margin-top:6px;">Hover or drag across the chart to read pump vs system head at any flow.</div>
       <div class="stage-label">3 · Selection &amp; resulting power</div>
       <div class="metric-grid" id="out-pump"></div>
     </div>
@@ -672,6 +673,7 @@ let loads = [
 let activeTab = 'summary';
 let hwTab = 0;   // hot-water sub-tab index
 let energyZoom = 1;   // horizontal zoom for the daily energy chart
+let pumpGeom = null;  // pump-chart geometry, for the hover/drag probe
 let occEqG = 2;  // water-equivalent occupancy (adults + guests + weighted children); set in recalc
 
 // results bucket populated by recalc(), read by summary/other panes
@@ -1368,12 +1370,13 @@ function renderPumpChart(op){
   const W=680,H=280,pad=44;
   const qmax=(Math.max(...pumpCurve.map(p=>p.q),op.q)*1.1)||5;
   const hmax=(Math.max(...pumpCurve.map(p=>p.h),sysHead(qmax))*1.1)||80;
+  pumpGeom={W,H,pad,qmax,hmax};                       // for the hover/drag probe
   const X=q=>pad+(q/qmax)*(W-pad-12), Y=h=>H-pad-(h/hmax)*(H-pad-12);
   const cs=[...pumpCurve].sort((a,b)=>a.q-b.q);
   const pumpPath=cs.map((p,i)=>(i?'L':'M')+X(p.q)+' '+Y(p.h)).join(' ');
   let sysPath='';for(let q=0;q<=qmax;q+=qmax/40)sysPath+=(sysPath?'L':'M')+X(q)+' '+Y(sysHead(q));
   let grid='';for(let i=0;i<=4;i++){const gy=pad+i*(H-pad-12)/4;grid+=`<line x1="${pad}" y1="${gy}" x2="${W-12}" y2="${gy}" stroke="var(--color-border-tertiary)" stroke-width="0.5"/>`;}
-  setHTML('pump-chart',`<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Pump and system curves">
+  setHTML('pump-chart',`<svg id="pump-svg" viewBox="0 0 ${W} ${H}" role="img" aria-label="Pump and system curves" style="touch-action:none;">
     ${grid}
     <line x1="${pad}" y1="${H-pad}" x2="${W-12}" y2="${H-pad}" stroke="var(--color-border-secondary)"/>
     <line x1="${pad}" y1="${pad}" x2="${pad}" y2="${H-pad}" stroke="var(--color-border-secondary)"/>
@@ -1385,8 +1388,29 @@ function renderPumpChart(op){
     <text x="${pad-6}" y="${pad-6}" font-size="11" fill="var(--color-text-tertiary)">head (${uHu()}) ${f(uH(hmax),0)}</text>
     <text x="${pad+8}" y="${pad+14}" font-size="11" fill="var(--color-text-info)">■ pump</text>
     <text x="${pad+64}" y="${pad+14}" font-size="11" fill="var(--color-text-warning)">▦ system</text>
+    <line id="pp-line" x1="0" y1="${pad}" x2="0" y2="${H-pad}" stroke="var(--color-border-primary)" stroke-width="1" stroke-dasharray="3 3" style="display:none"/>
+    <circle id="pp-pd" r="4" fill="var(--color-text-info)" style="display:none"/>
+    <circle id="pp-sd" r="4" fill="var(--color-text-warning)" style="display:none"/>
+    <rect x="${pad}" y="${pad}" width="${W-pad-12}" height="${H-2*pad}" fill="transparent" style="cursor:crosshair" onpointermove="pumpProbe(event)" onpointerdown="pumpProbe(event)" onpointerleave="pumpProbeClear()"></rect>
   </svg>`);
 }
+function pumpProbe(evt){
+  const g=pumpGeom, svg=el('pump-svg'); if(!g||!svg) return;
+  const r=svg.getBoundingClientRect(); if(!r.width) return;
+  const vbx=(evt.clientX-r.left)/r.width*g.W;
+  let q=(vbx-g.pad)/(g.W-g.pad-12)*g.qmax; q=Math.max(0,Math.min(g.qmax,q));
+  const ph=pumpHead(q), sh=sysHead(q);
+  const X=g.pad+(q/g.qmax)*(g.W-g.pad-12);
+  const Yp=g.H-g.pad-(ph/g.hmax)*(g.H-g.pad-12), Ys=g.H-g.pad-(sh/g.hmax)*(g.H-g.pad-12);
+  const ln=el('pp-line'),pd=el('pp-pd'),sd=el('pp-sd');
+  if(ln){ln.setAttribute('x1',X);ln.setAttribute('x2',X);ln.style.display='';}
+  if(pd){pd.setAttribute('cx',X);pd.setAttribute('cy',Yp);pd.style.display='';}
+  if(sd){sd.setAttribute('cx',X);sd.setAttribute('cy',Ys);sd.style.display='';}
+  const marg=ph-sh;
+  setHTML('pump-readout',`At <b>${FLOW(q,2)}</b> → pump <b style="color:var(--color-text-info)">${HEAD(ph,0)}</b> · system <b style="color:var(--color-text-warning)">${HEAD(sh,0)}</b> → `+
+    (marg>=0?`<b style="color:var(--color-text-success)">${HEAD(marg,0)} surplus</b> — pump can deliver this flow`:`<b style="color:var(--color-text-danger)">${HEAD(-marg,0)} short</b> — pump can't reach this flow`));
+}
+function pumpProbeClear(){ ['pp-line','pp-pd','pp-sd'].forEach(id=>{const e=el(id);if(e)e.style.display='none';}); setHTML('pump-readout','Hover or drag across the chart to read pump vs system head at any flow.'); }
 
 // ============================================================================
 // HOT WATER MODULE — 5 sub-tabs, all driven by shared S/R state.
@@ -1827,7 +1851,7 @@ function renderCompliance(){
 // Scoped per origin: the Confluence/GitHub-Pages version persists across reloads
 // there; the local file:// copy keeps its own separate memory.
 const STORAGE_KEY = 'uplift-water-planner-v3';   // v3: added fixture `auto` flag + reviewer fixes — discard stale state
-const APP_VERSION = 'v36';   // bump with each deploy (matches the Confluence iframe ?v tag)
+const APP_VERSION = 'v37';   // bump with each deploy (matches the Confluence iframe ?v tag)
 let booted = false;
 function setStatus(msg,icon){ setHTML('save-status', `<i class="ti ti-${icon||'check'}"></i>${msg}`); }
 function save(){
