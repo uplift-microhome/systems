@@ -302,6 +302,11 @@ svg{display:block;max-width:100%;height:auto;}
       <div id="grp-env"></div>
       <div class="footnote">Location/season sets peak sun hours and the daylight window; ambient anchors tank standby and the cold inlet. Solar array wattage &amp; derate live on the Power tab.</div>
     </div>
+    <div class="card">
+      <div class="section-title"><i class="ti ti-clipboard-list"></i>Assumptions &amp; structural context</div>
+      <div id="grp-assume"></div>
+      <div class="footnote" id="assume-notes"></div>
+    </div>
   </section>
 
   <!-- ================= WATER ================= -->
@@ -613,6 +618,8 @@ const S = {
   adults:2, children:0, guests:0, childFactor:60, occupancy:2,
   // system — autonomy split: water-days (cheap tank volume) vs power-days (expensive battery)
   busVoltage:48, waterDays:5, powerDays:3, reservePct:15,
+  // structural context (Variables → Assumptions). No reg max weight — forklift capacity caps dry weight; dry weight TBD.
+  forkliftCapacityKg:0, dryWeightKg:0, floorLiveLoadPsf:40,
   // hot water — inlet ≈ cabin ambient minus a margin (onboard tank sits inside; ~18°C/64°F); setpoint 60°C (140°F, Legionella-safe)
   inletF:64, setpointF:140, tankGal:10, elementW:1500,
   insulRperIn:6.5, insulIn:3, ambientF:68,
@@ -733,7 +740,7 @@ const FIELDS = {
   ],
   'grp-system':[
     ['busVoltage','DC bus voltage','V',1,'DC voltage of the house electrical bus. Sets amp draw for the heater and pump: Amps = Watts ÷ Volts.'],
-    ['waterDays','Water autonomy','days',0.5,'Days the fresh/grey tanks must last with no resupply — sized for storm / limited-access gaps. Cheap to extend (bigger tank).'],
+    ['waterDays','Water autonomy','days',0.5,'Days the fresh/grey tanks must last with no resupply — sized for storm / limited-access gaps. Default 5 is intentionally robust for emergency housing; cheap in $ but heavy — watch the tank-water-mass card and revisit against dry weight.'],
     ['powerDays','Power autonomy','days',0.5,'Days the battery must ride through with no solar. Each day adds expensive battery — buy fewer here and lean on the panels returning.'],
     ['reservePct','Tank reserve','%',5,'Safety buffer kept in the fresh tank on top of daily use so you never run it bone-dry — extra margin beyond the days of autonomy.'],
   ],
@@ -779,6 +786,11 @@ const FIELDS = {
   'grp-env':[
     ['ambientF','Cabin ambient temp','°F',1,'Air temperature inside the cabin. The hot tank bleeds heat to this (standby loss), and the cold inlet sits near it. Drops in a heat-out outage.','temp'],
     ['solarPSH','Peak sun hours','h/day',0.1,'Equivalent full-sun hours/day for the location/season — set by the scenario above, or override. Alaska midwinter ~0.5–1; temperate ~3.5; Texas summer ~6.'],
+  ],
+  'grp-assume':[
+    ['forkliftCapacityKg','Forklift capacity','kg',50,'The forklift / telehandler lift capacity — the governing cap on the unit dry weight (there is NO regulatory max weight). The home is transported with tanks empty, so water mass does not load the lift.'],
+    ['dryWeightKg','Unit dry weight (empty)','kg',10,'Empty weight of the finished unit. TBD — being finalized; must stay under the forklift capacity above. When set, the Tank-water-mass card shows water as a % of dry weight. (kg ≈ lb ÷ 2.205.)'],
+    ['floorLiveLoadPsf','Floor live load','psf',5,'HUD §3280.305(g)(1) minimum: 40 lb/ft² + dead load, for occupant + movable contents. A full water tank is far denser than this — it needs a dedicated structural/foundation path, not the floor allowance.'],
   ],
   'grp-toilet':[
     ['urineLppd','Urine per person','L/day',0.1,'Urine produced per person per day (roughly 1–1.5 L is typical). Drives container / leachate tank sizing.','volL'],
@@ -1071,7 +1083,7 @@ function recalc(){
     mcard('Peak flow',uFlu(),f(uFl(peakFlow),2),peakIndoor>=hose?'2 fixtures on':'hose bib') +
     mcard('Fresh tank',uVu(),f(uV(freshTank),0),`${S.waterDays}d + ${S.reservePct}%${excl>0?' · excl. hose':''}`) +
     mcard('Grey tank',uVu(),f(uV(greyTank),0),`${S.waterDays}d + ${S.reservePct}%`) +
-    mcard('Tank water mass',isM()?'kg':'lb',f(isM()?tankMassGal*3.78541:tankMassGal*8.34,0),'fresh + grey, full')
+    mcard('Tank water mass',isM()?'kg':'lb',f(isM()?tankMassGal*3.78541:tankMassGal*8.34,0),S.dryWeightKg>0?`${f(tankMassGal*3.78541/S.dryWeightKg*100,0)}% of dry wt`:'fresh + grey, full')
   );
   setHTML('note-demand',
     `<div class="notice-title"><i class="ti ti-info-circle"></i>How this is figured</div>`+
@@ -1329,6 +1341,16 @@ function recalc(){
     `${S.children?`, ${S.children} child${S.children===1?'':'ren'} @ ${S.childFactor}% use`:''}`+
     `${S.guests?`, ${S.guests} guest${S.guests===1?'':'s'}`:''}) → `+
     `water-equivalent <b>${f(R.occEq,1)}</b> occupants. Per-person water demand and shower volume scale from the water-equivalent figure.`
+  );
+  const dwSet=S.dryWeightKg>0, flSet=S.forkliftCapacityKg>0, fullMassKg=R.tankMassGal*3.78541;
+  setHTML('assume-notes',
+    `<b>Weight cap:</b> no regulatory max — the <b>forklift capacity</b> governs the unit's dry weight; the home ships with tanks <b>empty</b>, so water mass never loads the lift. `+
+    (flSet
+      ? `Forklift cap <b>${f(S.forkliftCapacityKg,0)} kg</b>${dwSet?` · dry weight ${f(S.dryWeightKg,0)} kg ${S.dryWeightKg<=S.forkliftCapacityKg?'✓ within cap':'✗ OVER cap'}`:` · dry weight TBD`}. `
+      : `Forklift capacity TBD — enter it above; dry weight (TBD) must stay under it. `)+
+    `<b>Full tanks ≈ ${MASS(R.tankMassGal,0)}</b>${dwSet?` = ${f(fullMassKg/S.dryWeightKg*100,0)}% of dry weight`:''} — an in-place floor/foundation load, not a transport load. `+
+    `<b>Code backdrop:</b> HUD §3280.305 — floor live load 40 psf + dead, roof N/M/S 40/30/20 psf, wind Zone II/III 100/110 mph. OSHA §1910.142 (labor housing) — ≥50 sq ft/occupant, toilets 1 per 15, potable-water supply. `+
+    `<b>Benchmark:</b> ${R.occHead} adults · <b>water density</b> 8.34 lb/gal (1 kg/L).`
   );
 
   save();
@@ -1805,7 +1827,7 @@ function renderCompliance(){
 // Scoped per origin: the Confluence/GitHub-Pages version persists across reloads
 // there; the local file:// copy keeps its own separate memory.
 const STORAGE_KEY = 'uplift-water-planner-v3';   // v3: added fixture `auto` flag + reviewer fixes — discard stale state
-const APP_VERSION = 'v34';   // bump with each deploy (matches the Confluence iframe ?v tag)
+const APP_VERSION = 'v35';   // bump with each deploy (matches the Confluence iframe ?v tag)
 let booted = false;
 function setStatus(msg,icon){ setHTML('save-status', `<i class="ti ti-${icon||'check'}"></i>${msg}`); }
 function save(){
