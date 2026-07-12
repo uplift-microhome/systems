@@ -391,7 +391,7 @@ svg{display:block;max-width:100%;height:auto;}
         <table class="hwtbl"><thead><tr><th style="width:18%;">Element</th><th style="width:15%;">Amps</th><th style="width:22%;">Cold start</th><th style="width:20%;">Post-shower</th><th style="width:14%;">Energy</th><th style="width:11%;">% batt</th></tr></thead><tbody id="heater-table"></tbody></table>
       </div>
       <div class="heater-cards" id="heater-cards"></div>
-      <div class="notice-amber"><i class="ti ti-bolt"></i> <b>Wire sizing:</b> 1000 W → 10 AWG. 1500 W → 10 AWG (8 AWG for runs over 6 ft). 2000 W → 8 AWG min, 6 AWG preferred. Fusing: 25 A for 1500 W, 35 A for 2000 W. Direct DC to element — no inverter losses.</div>
+      <div class="notice-amber" id="heater-wire"></div>
     </div>
 
     <!-- HW TAB 2: Insulation -->
@@ -633,11 +633,12 @@ const S = {
 
 // fixtures: gpm=flowrate, min=effective water-on min/day, pctHot=% from hot tank,
 // grey=drains to grey tank, pp=usage scales per person, dfu=drainage fixture units, trap=trap size in.
+// auto = counts toward fresh/grey tank autonomy sizing (off for hose — run off external supply)
 let fixtures = [
-  {name:'Kitchen sink',  gpm:1.2,  min:5, pctHot:60, grey:true,  pp:true,  dfu:2, trap:1.5,  showerLike:false},
-  {name:'Bathroom sink', gpm:1.2,  min:4, pctHot:50, grey:true,  pp:true,  dfu:1, trap:1.25, showerLike:false},
-  {name:'Shower',        gpm:1.75, min:2, pctHot:77, grey:true,  pp:true,  dfu:2, trap:2.0,  showerLike:true},
-  {name:'Hose bib',      gpm:3.0,  min:2, pctHot:0,  grey:false, pp:false, dfu:0, trap:0,    showerLike:false}, // flow-restricted to 3 GPM
+  {name:'Kitchen sink',  gpm:1.2,  min:5, pctHot:60, grey:true,  pp:true,  dfu:2, trap:1.5,  showerLike:false, auto:true},
+  {name:'Bathroom sink', gpm:1.2,  min:4, pctHot:50, grey:true,  pp:true,  dfu:1, trap:1.25, showerLike:false, auto:true},
+  {name:'Shower',        gpm:1.75, min:2, pctHot:77, grey:true,  pp:true,  dfu:2, trap:2.0,  showerLike:true,  auto:true},
+  {name:'Hose bib',      gpm:3.0,  min:2, pctHot:0,  grey:false, pp:false, dfu:0, trap:0,    showerLike:false, auto:false}, // flow-restricted to 3 GPM
 ];
 
 // candidate shower heads to compare (what-if, does not affect model until "Use")
@@ -791,6 +792,12 @@ function el(id){return document.getElementById(id);}
 function setHTML(id,html){const e=el(id);if(e)e.innerHTML=html;}
 function f(v,dec){if(!isFinite(v))return '—';return Number(v).toLocaleString(undefined,{minimumFractionDigits:dec,maximumFractionDigits:dec});}
 function heatWh(gal,dT){return 8.34*gal*dT/3.412;} // BTU to heat water / 3.412 = Wh
+// shower hot fraction, clamped 0..1 (can't draw >100% hot; guards divide-by-zero)
+function hotFracAt(setF){return setF>S.inletF?Math.min(1,Math.max(0,(S.showerMixF-S.inletF)/(setF-S.inletF))):1;}
+function tempsValid(){return S.setpointF>S.showerMixF && S.showerMixF>S.inletF;}
+// wire/fuse sizing at given amps (125% continuous rule); indicative — verify with EE
+function fuseFor(a){const std=[15,20,25,30,35,40,45,50,60,70,80,90,100,110,125,150,175,200];const need=a*1.25;return std.find(x=>x>=need)||Math.ceil(need/25)*25;}
+function awgForFuse(fz){return fz<=20?'14':fz<=25?'12':fz<=35?'10':fz<=50?'8':fz<=65?'6':fz<=85?'4':fz<=115?'2':'1/0';}
 function fixGal(fx){return fx.gpm*fx.min*(fx.pp?occEqG:1);} // gal/day (per-person scales with water-equiv occupancy)
 const L2GAL=0.264172;
 
@@ -828,6 +835,7 @@ function FLOW(g,dec=2){return `${f(uFl(g),dec)} ${uFlu()}`;}
 function HEAD(ft,dec=0){return `${f(uH(ft),dec)} ${uHu()}`;}
 function LEN(inch,dec=1){return `${f(uL(inch),dec)} ${uLu()}`;}
 function AREA(ft2,dec=1){return `${f(uA(ft2),dec)} ${uAu()}`;}
+function MASS(gal,dec=0){return isM()?`${f(gal*3.78541,dec)} kg`:`${f(gal*8.34,dec)} lb`;}   // water mass (1 kg/L, 8.34 lb/gal)
 // per-dimension input conversion map (used by renderInputs)
 const DIM = {
   temp:{d:uT,i:uTi,u:uTu}, vol:{d:uV,i:uVi,u:uVu}, volL:{d:uVL,i:uVLi,u:uVu},
@@ -902,25 +910,27 @@ function renderFixtureTable(){
     `<th title="Effective water-on minutes per day for this fixture. For a military shower, enter the ~2 min actually flowing, not the 10 min in the stall.">min/day</th>`+
     `<th title="Share of this fixture's water drawn from the hot tank (rest is cold).">%hot</th>`+
     `<th title="Does this fixture drain to the grey tank? Hose bib (external) and composting toilet do not.">grey</th>`+
-    `<th title="Does usage scale with occupancy? On for personal fixtures, off for one-offs like a hose bib.">/person</th><th></th></tr>`;
+    `<th title="Does usage scale with occupancy? On for personal fixtures, off for one-offs like a hose bib.">/person</th>`+
+    `<th title="Counts toward fresh/grey tank autonomy sizing? Off for the hose bib (assumed run off an external supply during a no-resupply event).">tank</th><th></th></tr>`;
   fixtures.forEach((fx,i)=>{
     h+=`<tr>
       <td class="name"><input type="text" value="${fx.name}" oninput="updFix(${i},'name',this.value)"></td>
       <td><input type="number" step="0.05" value="${f(uFl(fx.gpm),2)}" oninput="updFixFlow(${i},this.value)"></td>
       <td><input type="number" step="0.5" value="${fx.min}" oninput="updFix(${i},'min',this.value)"></td>
       <td>${fx.showerLike
-        ? `<span class="help" title="Auto-derived from temperatures: (mix ${T(S.showerMixF)} − inlet ${T(S.inletF)}) ÷ (setpoint ${T(S.setpointF)} − inlet ${T(S.inletF)}) = ${Math.round((S.showerMixF-S.inletF)/(S.setpointF-S.inletF)*100)}%. Not editable — it follows the tank/mix temps.">${Math.round((S.showerMixF-S.inletF)/(S.setpointF-S.inletF)*100)}%<i class="ti ti-calculator" style="font-size:11px;margin-left:3px;"></i></span>`
+        ? `<span class="help" title="Auto-derived: (mix ${T(S.showerMixF)} − inlet ${T(S.inletF)}) ÷ (setpoint ${T(S.setpointF)} − inlet ${T(S.inletF)}), clamped ≤ 100%. Not editable — follows the tank/mix temps.">${Math.round(hotFracAt(S.setpointF)*100)}%<i class="ti ti-calculator" style="font-size:11px;margin-left:3px;"></i></span>`
         : `<input type="number" step="5" value="${fx.pctHot}" oninput="updFix(${i},'pctHot',this.value)">`}</td>
       <td style="text-align:center"><input type="checkbox" ${fx.grey?'checked':''} onchange="updFix(${i},'grey',this.checked)"></td>
       <td style="text-align:center"><input type="checkbox" ${fx.pp?'checked':''} onchange="updFix(${i},'pp',this.checked)"></td>
+      <td style="text-align:center"><input type="checkbox" ${fx.auto!==false?'checked':''} onchange="updFix(${i},'auto',this.checked)"></td>
       <td style="text-align:center"><button class="btn tiny" onclick="rmFixture(${i})">✕</button></td>
     </tr>`;
   });
   setHTML('fixture-table',h);
 }
-function updFix(i,k,v){fixtures[i][k]=(k==='name')?v:(k==='grey'||k==='pp')?v:parseFloat(v);recalc();}
+function updFix(i,k,v){fixtures[i][k]=(k==='name')?v:(k==='grey'||k==='pp'||k==='auto')?v:parseFloat(v);recalc();}
 function updFixFlow(i,v){fixtures[i].gpm=uFli(parseFloat(v));recalc();}   // flow input converts to stored GPM
-function addFixture(){fixtures.push({name:'New fixture',gpm:1.0,min:2,pctHot:0,grey:true,pp:true,dfu:1,trap:1.25,showerLike:false});renderFixtureTable();recalc();}
+function addFixture(){fixtures.push({name:'New fixture',gpm:1.0,min:2,pctHot:0,grey:true,pp:true,dfu:1,trap:1.25,showerLike:false,auto:true});renderFixtureTable();recalc();}
 function rmFixture(i){fixtures.splice(i,1);renderFixtureTable();recalc();}
 
 // ---- electrical loads table (Energy tab) ----
@@ -955,7 +965,7 @@ function setControlMode(v){S.controlMode=v;recalc();}
 function renderShowerHeadTable(){
   const dT=S.setpointF-S.inletF;
   const smin=showerFix().min;
-  const hf=(S.showerMixF-S.inletF)/(S.setpointF-S.inletF);
+  const hf=hotFracAt(S.setpointF);
   let h=`<tr><th>Option</th><th>${uFlu()}</th><th>Hot/shower</th><th>Showers/tank</th><th>Reheat</th><th></th></tr>`;
   showerHeads.forEach((o,i)=>{
     const hotPer=o.gpm*smin*S.foI*hf;                        // hot gal per single shower (with FoI)
@@ -1019,6 +1029,7 @@ function loopFrictionFt(q){ return hwSlope(q,headerID())*S.headerLenFt + hwSlope
 function sysHead(q){ return S.staticLiftFt + S.fixtureHeadFt + loopFrictionFt(q); }  // TDH at flow q (shower critical loop)
 function operatingPoint(){
   const qmax=[...pumpCurve].sort((a,b)=>b.q-a.q)[0].q;
+  if(pumpHead(0)<sysHead(0)) return {q:0,h:sysHead(0),dead:true};   // pump can't overcome static head → no flow
   let prev=pumpHead(0)-sysHead(0);
   for(let x=0.02;x<=qmax;x+=0.02){
     const d=pumpHead(x)-sysHead(x);
@@ -1034,34 +1045,39 @@ function recalc(){
   S.occupancy = (S.adults||0)+(S.children||0)+(S.guests||0);          // head count
   const occEq = (S.adults||0)+(S.guests||0)+(S.children||0)*(S.childFactor/100); // water-equivalent
   occEqG = occEq;
-  // shower hot fraction — single source of truth, derived from temps (mix blended down from setpoint)
-  const hotFrac=(S.showerMixF-S.inletF)/(S.setpointF-S.inletF);
-  Object.assign(R,{occHead:S.occupancy, occEq, hotFrac});
+  // shower hot fraction — single source of truth, derived from temps (clamped 0..1)
+  const hotFrac=hotFracAt(S.setpointF);
+  const tempsOK=tempsValid();
+  Object.assign(R,{occHead:S.occupancy, occEq, hotFrac, tempsOK});
 
   // ---------- DEMAND ----------
-  let totalFresh=0,hotDaily=0,greyDaily=0;
-  fixtures.forEach(fx=>{const g=fixGal(fx);totalFresh+=g;const hp=fx.showerLike?hotFrac:(fx.pctHot/100);hotDaily+=g*hp;if(fx.grey)greyDaily+=g;});
+  let totalFresh=0,hotDaily=0,greyDaily=0,autoFresh=0,autoGrey=0;
+  fixtures.forEach(fx=>{const g=fixGal(fx);const on=fx.auto!==false;totalFresh+=g;const hp=fx.showerLike?hotFrac:(fx.pctHot/100);hotDaily+=g*hp;if(fx.grey)greyDaily+=g;if(on)autoFresh+=g;if(on&&fx.grey)autoGrey+=g;});
   const indoor=fixtures.filter(fx=>fx.grey).map(fx=>fx.gpm).sort((a,b)=>b-a);
   const peakIndoor=(indoor[0]||0)+(indoor[1]||0);
   const hose=Math.max(0,...fixtures.filter(fx=>!fx.grey).map(fx=>fx.gpm));
   const peakFlow=Math.max(peakIndoor,hose);
-  const freshTank=totalFresh*S.waterDays*(1+S.reservePct/100);
-  const greyTank=greyDaily*S.waterDays;
-  Object.assign(R,{totalFresh,hotDaily,greyDaily,peakFlow,freshTank,greyTank});
+  const resv=1+S.reservePct/100;
+  const freshTank=autoFresh*S.waterDays*resv;              // only autonomy-flagged fixtures (excludes hose)
+  const greyTank=autoGrey*S.waterDays*resv;                // matches fresh (same reserve)
+  const excl=totalFresh-autoFresh;
+  const tankMassGal=freshTank+greyTank;
+  Object.assign(R,{totalFresh,hotDaily,greyDaily,peakFlow,freshTank,greyTank,autoFresh,autoGrey,tankMassGal});
 
   setHTML('out-demand',
     mcard('Total fresh',uVu()+'/day',f(uV(totalFresh),1)) +
     mcard('Hot water',uVu()+'/day',f(uV(hotDaily),1)) +
     mcard('Grey produced',uVu()+'/day',f(uV(greyDaily),1)) +
     mcard('Peak flow',uFlu(),f(uFl(peakFlow),2),peakIndoor>=hose?'2 fixtures on':'hose bib') +
-    mcard('Fresh tank',uVu(),f(uV(freshTank),0),`${S.waterDays}d + ${S.reservePct}% reserve`) +
-    mcard('Grey tank',uVu(),f(uV(greyTank),0),`${S.waterDays}d capture`)
+    mcard('Fresh tank',uVu(),f(uV(freshTank),0),`${S.waterDays}d + ${S.reservePct}%${excl>0?' · excl. hose':''}`) +
+    mcard('Grey tank',uVu(),f(uV(greyTank),0),`${S.waterDays}d + ${S.reservePct}%`) +
+    mcard('Tank water mass',isM()?'kg':'lb',f(isM()?tankMassGal*3.78541:tankMassGal*8.34,0),'fresh + grey, full')
   );
   setHTML('note-demand',
     `<div class="notice-title"><i class="ti ti-info-circle"></i>How this is figured</div>`+
     `Each fixture = flow × min/day × (occupancy if per-person). Summed: <b>${VOL(totalFresh,1)}/day fresh</b>, of which <b>${VOL(hotDaily,1)}</b> is hot. `+
     `Grey (drained fixtures only) = <b>${VOL(greyDaily,1)}/day</b>; hose bib &amp; composting toilet add no grey. `+
-    `Fresh tank = ${VOL(totalFresh,1)} × ${S.waterDays} water-days × (1+${S.reservePct}%) = <b>${VOL(freshTank,0)}</b>.`
+    `Fresh tank sizes only <b>autonomy</b> fixtures: <b>${VOL(autoFresh,1)}</b>/day × ${S.waterDays} d × (1+${S.reservePct}%) = <b>${VOL(freshTank,0)}</b>${excl>0?` (hose's ${VOL(excl,1)}/day excluded — assumed off external supply)`:''}. Grey carries the same reserve. Full tanks ≈ <b>${MASS(tankMassGal,0)}</b>.`
   );
 
   // ---------- HOT WATER (shared model — feeds energy budget + sub-tabs) ----------
@@ -1138,18 +1154,23 @@ function recalc(){
   const hydraulicW=dutyFlow*reqHead*0.1885;             // 0.1885 W per GPM·ft
   // 2) SELECTION: does the candidate pump curve reach the duty point? + its natural operating point
   const op=operatingPoint();
+  const opDead=op.q<0.02||op.dead;                     // pump can't overcome static head → no flow
   const provideHead=pumpHead(dutyFlow);
-  const canMeetPeak=provideHead>=reqHead;
+  const canMeetPeak=provideHead>=reqHead && !opDead;
+  // flow-capacity check: the largest single draw (hose) at its own low-residual head
+  const maxSingle=Math.max(...fixtures.map(fx=>fx.gpm));
+  const peakReqHead=S.staticLiftFt+loopFrictionFt(peakFlow);   // lift + friction (a bib needs little residual)
+  const flowOK=pumpHead(peakFlow)>=peakReqHead && !opDead;
+  const pumpOK=canMeetPeak && flowOK;
   // 3) POWER follows from duty + efficiency (not a hand-entered watt)
   const pumpElecW=hydraulicW/Math.max(S.pumpEffPct/100,0.01);
   const deliveredFlow=Math.max(op.q,0.01);
-  const pumpRuntimeMin=totalFresh/deliveredFlow;
-  const pumpWhDay=pumpElecW*(pumpRuntimeMin/60);
+  const pumpRuntimeMin=opDead?Infinity:totalFresh/deliveredFlow;
+  const pumpWhDay=opDead?0:pumpElecW*(pumpRuntimeMin/60);
   const pumpAmps=pumpElecW/S.busVoltage;
   const PSI2FT=2.3067;
   const reqPsi=reqHead/PSI2FT, residualPsi=S.fixtureHeadFt/PSI2FT, pressureOK=reqPsi<=S.maxSysPsi;
-  const maxSingle=Math.max(...fixtures.map(fx=>fx.gpm));   // largest single-fixture flow (hose) — flow-capacity check
-  Object.assign(R,{pumpWhDay,pumpAmps,canMeetPeak,reqHead,dutyFlow,qShower,provideHead,pumpElecW,hydraulicW,reqPsi,residualPsi,pressureOK,opQ:op.q,opH:op.h,pumpRuntimeMin,headerFricFt,branchFricFt,vHeader,vBranch,maxSingle});
+  Object.assign(R,{pumpWhDay,pumpAmps,canMeetPeak,flowOK,pumpOK,opDead,reqHead,dutyFlow,qShower,provideHead,pumpElecW,hydraulicW,reqPsi,residualPsi,pressureOK,opQ:op.q,opH:op.h,pumpRuntimeMin,headerFricFt,branchFricFt,vHeader,vBranch,maxSingle,peakReqHead});
 
   // requirement (driven by usage)
   setHTML('out-duty',
@@ -1161,21 +1182,24 @@ function recalc(){
   // selection + resulting power
   setHTML('out-pump',
     mcard('Pump at duty',uHu(),f(uH(provideHead),0),canMeetPeak?`✓ meets ${HEAD(reqHead,0)}`:`✗ short of ${HEAD(reqHead,0)}`) +
-    mcard('Operating point',uFlu(),f(uFl(op.q),2),`@ ${HEAD(op.h,0)} delivered`) +
+    mcard('Operating point',opDead?'':uFlu(),opDead?'—':f(uFl(op.q),2),opDead?`can't overcome ${HEAD(sysHead(0),0)} static`:`@ ${HEAD(op.h,0)} delivered`) +
+    mcard('Peak-flow check',uFlu(),f(uFl(peakFlow),2),flowOK?`✓ passes @ ${HEAD(peakReqHead,0)}`:`✗ short at ${HEAD(peakReqHead,0)}`) +
     mcard('Required pump power','W',f(pumpElecW,0),`hydraulic ÷ ${S.pumpEffPct}% eff`) +
     mcard('Pump draw','A DC',f(pumpAmps,1),`${f(pumpElecW,0)}W ÷ ${S.busVoltage}V`) +
-    mcard('Pump energy','Wh/day',f(pumpWhDay,0),`${f(pumpRuntimeMin,0)} min/day run`)
+    mcard('Pump energy','Wh/day',opDead?'—':f(pumpWhDay,0),opDead?'pump undersized':`${f(pumpRuntimeMin,0)} min/day run`)
   );
   const npump=el('note-pump');
   if(npump){
-    npump.className='notice '+(canMeetPeak?'teal':'amber');
-    npump.innerHTML=`<div class="notice-title"><i class="ti ti-${canMeetPeak?'circle-check':'alert-triangle'}"></i>${canMeetPeak?'Pump meets the shower duty':'Pump undersized for shower duty'}</div>`+
+    npump.className='notice '+(pumpOK?'teal':'amber');
+    npump.innerHTML=`<div class="notice-title"><i class="ti ti-${pumpOK?'circle-check':'alert-triangle'}"></i>${pumpOK?'Pump meets the duty':'Pump undersized'}</div>`+
       `<b>Shower governs the head:</b> design flow <b>${FLOW(dutyFlow,2)}</b> (shower × ${f(S.simulFactor,2)}) at <b>${HEAD(reqHead,1)} / ${f(reqPsi,0)} psi</b> TDH (lift + residual + friction). `+
       (canMeetPeak
-        ? `The candidate pump makes ${HEAD(provideHead,0)} there — enough. `
-        : `The candidate pump only makes ${HEAD(provideHead,0)} there — raise the curve. `)+
-      `Also confirm it passes the largest single draw (${FLOW(R.maxSingle,2)}, e.g. hose) at low head. `+
-      `<b>Pump drives power:</b> ${f(hydraulicW,0)} W hydraulic ÷ ${S.pumpEffPct}% = <b>${f(pumpElecW,0)} W</b> (${f(pumpAmps,1)} A) × ~${f(pumpRuntimeMin,0)} min/day ⇒ <b>${f(pumpWhDay,0)} Wh/day</b>. `+
+        ? `Pump makes ${HEAD(provideHead,0)} there — enough. `
+        : (opDead
+          ? `Pump can't overcome the ${HEAD(sysHead(0),0)} static head — <b>no flow</b>. `
+          : `Pump only makes ${HEAD(provideHead,0)} there — raise the curve. `))+
+      `<b>Flow check:</b> largest single draw ${FLOW(peakFlow,2)} (hose) needs ${HEAD(peakReqHead,0)}; pump makes ${HEAD(pumpHead(peakFlow),0)} → ${flowOK?'OK':'<b>short</b>'}. `+
+      (opDead?'':`<b>Power:</b> ${f(hydraulicW,0)} W hydraulic ÷ ${S.pumpEffPct}% = <b>${f(pumpElecW,0)} W</b> (${f(pumpAmps,1)} A) × ~${f(pumpRuntimeMin,0)} min/day ⇒ <b>${f(pumpWhDay,0)} Wh/day</b>. `)+
       `Header ${vHeader<=5?'velocity OK':'<b>velocity high — go ¾″</b>'} (${f(vHeader,1)} ft/s on ${S.headerSize}″).`;
   }
   renderPumpChart(op);
@@ -1397,7 +1421,10 @@ function setHeaderSize(v){S.headerSize=v;recalc();}
 function renderHwSizing(){
   const shf=showerFix(), hf=R.hotFrac, mix=R.mixGal, tn=R.hotNeed;
   const gpp=shf.gpm*shf.min, gAll=gpp*R.occEq, head=S.tankGal-tn;
-  setHTML('hotfrac-note',`<b>Shower hot fraction</b> = (mix − inlet) ÷ (setpoint − inlet) = (${T(S.showerMixF)} − ${T(S.inletF)}) ÷ (${T(S.setpointF)} − ${T(S.inletF)}) = <b>${Math.round(hf*100)}%</b>. The shower blends that share of ${T(S.setpointF)} tank water with cold to reach ${T(S.showerMixF)} at the head — it's derived, not hand-set, so it always tracks the temps. (Sinks keep their own manual %hot.)`);
+  const badTemp = !tempsValid();
+  setHTML('hotfrac-note',
+    (badTemp?`<div style="color:var(--color-text-danger);font-weight:600;margin-bottom:6px;"><i class="ti ti-alert-triangle"></i> Setpoint (${T(S.setpointF)}) must be above shower-mix (${T(S.showerMixF)}), which must be above inlet (${T(S.inletF)}) — the shower can't reach temperature; hot fraction is clamped to 100%.</div>`:'')+
+    `<b>Shower hot fraction</b> = (mix − inlet) ÷ (setpoint − inlet) = (${T(S.showerMixF)} − ${T(S.inletF)}) ÷ (${T(S.setpointF)} − ${T(S.inletF)}) = <b>${Math.round(hf*100)}%</b>. The shower blends that share of ${T(S.setpointF)} tank water with cold to reach ${T(S.showerMixF)} at the head — derived, not hand-set, so it always tracks the temps. (Sinks keep their own manual %hot.)`);
   const occLbl=`${R.occHead} ppl${S.children?` (${f(R.occEq,1)} water-eq)`:''}`;
   const steps=[
     [`${shf.min} min × ${FLOW(shf.gpm,2)}`,`${VOL(gpp,1)}/person`,'effective water-on time'],
@@ -1413,7 +1440,7 @@ function renderHwSizing(){
   setHTML('m-tank-note',`${VOL(S.tankGal,0)} tank − ${VOL(tn,1)} drawn`);
   setHTML('m-post',`${T(postShowerTemp(),0)}`);
   setHTML('temp-table',[130,140,150,160].map(t=>{
-    const h=(S.showerMixF-S.inletF)/(t-S.inletF);
+    const h=hotFracAt(t);
     const nd=shf.gpm*shf.min*R.occEq*S.foI*h;
     const isSel=t===S.setpointF;
     const nc=nd<S.tankGal*0.8?'#0F6E56':nd<S.tankGal*1.1?'#BA7517':'#A32D2D';
@@ -1427,9 +1454,9 @@ function renderHwSizing(){
 function renderHwHeater(){
   const bk=bankK();
   const ht=[
-    {w:1000,color:'#185FA5',bg:'#E6F1FB',pros:['Lowest current draw','10 AWG wiring','Gentlest on the bank'],cons:['Slowest recovery — fine overnight']},
-    {w:1500,color:'#0F6E56',bg:'#E1F5EE',pros:['Balanced speed & current','Within a 100 A bank limit','Fits 15 A shore budget'],cons:['None significant']},
-    {w:2000,color:'#854F0B',bg:'#FAEEDA',pros:['Fastest recovery','Same energy per cycle'],cons:['8 AWG wiring required','Tight on 15 A shore']},
+    {w:1000,color:'#185FA5',bg:'#E6F1FB',pros:['Lowest current draw','Gentlest on the bank'],cons:['Slowest recovery — fine overnight']},
+    {w:1500,color:'#0F6E56',bg:'#E1F5EE',pros:['Balanced speed & current',`Well within the ${S.battModules*100} A pack limit`],cons:['None significant']},
+    {w:2000,color:'#854F0B',bg:'#FAEEDA',pros:['Fastest recovery','Same energy per cycle'],cons:['Heaviest wire & fuse','Highest peak draw']},
   ];
   const nearest=ht.reduce((a,b)=>Math.abs(b.w-S.elementW)<Math.abs(a.w-S.elementW)?b:a);
   ht.forEach(h=>h.rec=(h===nearest));
@@ -1445,6 +1472,10 @@ function renderHwHeater(){
     return `<tr style="background:${h.rec?h.bg:'transparent'};"><td style="font-weight:500;color:${lbl};">${h.w} W${h.rec?' <span style="background:#fff;color:#085041;font-size:10px;font-weight:500;padding:1px 6px;border-radius:4px;border:.5px solid #9FE1CB;">yours</span>':''}</td><td style="font-family:var(--font-mono);color:${tcol};">${f(h.w/S.busVoltage,1)} A</td><td><span style="font-weight:500;font-family:var(--font-mono);color:${tcol};">${Math.round(cm)} min</span><div style="height:3px;background:var(--color-border-tertiary);border-radius:2px;margin-top:5px;width:70px;"><div style="height:3px;background:${h.color};border-radius:2px;width:${bw}%;"></div></div></td><td style="font-family:var(--font-mono);color:${tcol};">${Math.round(pm)} min</td><td style="font-family:var(--font-mono);color:${tcol};">${csk.toFixed(2)} kWh</td><td style="color:${scol};font-family:var(--font-mono);">${bp}%</td></tr>`;
   }).join(''));
   setHTML('heater-cards',ht.map(h=>`<div style="background:var(--color-background-primary);border-radius:var(--border-radius-lg);border:${h.rec?'2px solid '+h.color:'.5px solid var(--color-border-tertiary)'};padding:13px 15px;"><p style="font-weight:500;color:${h.color};font-size:14px;margin:0 0 8px;">${h.w} W${h.rec?' ★':''}</p><ul style="margin:0;padding-left:15px;font-size:12px;line-height:2.0;color:var(--color-text-secondary);">${h.pros.map(p=>`<li style="color:var(--color-text-primary);">${p}</li>`).join('')}${h.cons.map(c=>`<li>${c}</li>`).join('')}</ul></div>`).join(''));
+  // dynamic wire/fuse note computed from the actual bus voltage (125% continuous rule)
+  setHTML('heater-wire', `<i class="ti ti-bolt"></i> <b>Wire &amp; fuse @ ${S.busVoltage} V DC</b> (125% continuous): `+
+    ht.map(h=>{const a=h.w/S.busVoltage,fz=fuseFor(a);return `${h.w} W → ${f(a,1)} A → ${fz} A fuse / ${awgForFuse(fz)} AWG`;}).join(' · ')+
+    `. Switching this DC current needs a <b>DC-rated contactor or SSR</b> (DC arcs don't self-extinguish). Direct DC to element — no inverter losses. Sizing indicative — verify with your EE.`);
 }
 
 // ---- HW tab 2: insulation ----
@@ -1712,13 +1743,13 @@ function renderDiagram(){
   node('h_am',1,258,28,[`elementAmps = ${f(R.elementAmps,1)} A`],'calc');
   vEdge('h_in','h_hf');vEdge('h_hf','h_he');vEdge('h_he','h_sb');vEdge('h_sb','h_am');
   // lane 3: pump
-  const pOK=R.canMeetPeak, prOK=R.pressureOK;
+  const pOK=R.pumpOK, prOK=R.pressureOK;
   node('p_in',2,36,54,[`IN: lift ${HEAD(S.staticLiftFt,1)} · resid ${HEAD(S.fixtureHeadFt,0)}`,`${S.headerSize}″ hdr ${HEAD(S.headerLenFt,0)} · ½″ br ${HEAD(S.branchLenFt,0)}`,`×${f(S.simulFactor,2)} · eff ${S.pumpEffPct}% · ≤${S.maxSysPsi}psi`],'in');
   node('p_rh',2,108,40,[`TDH ${HEAD(R.reqHead,1)} (${f(R.reqPsi,1)} psi)`,`${prOK?'≤':'EXCEEDS'} ${S.maxSysPsi} psi ${prOK?'✓':'✗'}`],prOK?'calc':'flag');
   node('p_hy',2,166,28,[`hydraulic = ${f(R.hydraulicW,0)} W`],'calc');
   node('p_el',2,212,28,[`pumpElec ${f(R.pumpElecW,0)} W · ${f(R.pumpAmps,1)} A`],'key');
   node('p_op',2,258,40,[`op pt ${FLOW(R.opQ,2)} @ ${HEAD(R.opH,0)}`,`${f(R.pumpRuntimeMin,0)} min/d → ${f(R.pumpWhDay,0)} Wh/d`],'calc');
-  node('p_fl',2,316,40, pOK?[`curve ${HEAD(R.provideHead,0)} ≥ duty ✓`,`pump meets peak`]:[`curve ${HEAD(R.provideHead,0)} < ${HEAD(R.reqHead,0)} ✗`,`FLAG: pump undersized`], pOK?'key':'flag');
+  node('p_fl',2,316,40, pOK?[`meets duty + peak flow ✓`,`shower & hose covered`]:[`${R.opDead?'no flow (static)':(!R.canMeetPeak?'head short':'peak flow short')} ✗`,`FLAG: pump undersized`], pOK?'key':'flag');
   vEdge('p_in','p_rh');vEdge('p_rh','p_hy');vEdge('p_hy','p_el');vEdge('p_el','p_op');vEdge('p_op','p_fl');
   // lane 4: power
   const bOK=R.waterWhDay<=S.budgetWh, dOK=R.meetsDays;
@@ -1773,8 +1804,8 @@ function renderCompliance(){
 // ---- persistence: auto-save inputs to this browser, restore on load ----
 // Scoped per origin: the Confluence/GitHub-Pages version persists across reloads
 // there; the local file:// copy keeps its own separate memory.
-const STORAGE_KEY = 'uplift-water-planner-v2';   // bumped v1→v2 to discard stale saved state so current defaults load
-const APP_VERSION = 'v33';   // bump with each deploy (matches the Confluence iframe ?v tag)
+const STORAGE_KEY = 'uplift-water-planner-v3';   // v3: added fixture `auto` flag + reviewer fixes — discard stale state
+const APP_VERSION = 'v34';   // bump with each deploy (matches the Confluence iframe ?v tag)
 let booted = false;
 function setStatus(msg,icon){ setHTML('save-status', `<i class="ti ti-${icon||'check'}"></i>${msg}`); }
 function save(){
@@ -1825,7 +1856,7 @@ const DEFAULTS = {
 };
 
 // admin-set default baseline (password-gated) overrides code defaults for this origin
-const DEFAULTS_KEY = 'uplift-water-planner-defaults-v2';   // bumped so any stale admin baseline is ignored
+const DEFAULTS_KEY = 'uplift-water-planner-defaults-v3';   // bumped with the schema change
 (function loadAdminDefaults(){
   try{
     const raw=localStorage.getItem(DEFAULTS_KEY); if(!raw) return;
